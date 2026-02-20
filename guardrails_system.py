@@ -16,43 +16,56 @@ load_dotenv()
 
 class RAGGuardrails:
     def __init__(self):
-        # We will use a fast/cheap LLM for guardrails where needed
+        # We will use a fast model for guardrails
         self.guardrail_llm = ChatGoogleGenerativeAI(model="gemini-flash-latest", temperature=0)
 
     # ------------------
     # PART A1: INPUT GUARDRAILS
     # ------------------
-    def check_input_guardrails(self, query: str) -> Tuple[bool, str, str]:
+    def check_input_guardrails(self, query: str) -> Tuple[str, str, str]:
         """
-        Returns (is_passed, error_code, modified_query_or_message)
+        Returns (error_code, modified_query_or_message)
         """
         # 1. Query length limit
         if len(query) > 500:
-            return False, "QUERY_TOO_LONG", "Your query is too long. Please limit it to 500 characters."
+            return "QUERY_TOO_LONG", "Your query is too long. Please limit it to 500 characters."
+
+        # Part B: Input sanitization (Prompt Injection Defense #1)
+        if self._detect_prompt_injection(query):
+            return "POLICY_BLOCK", "I cannot process this request due to a potential policy violation."
 
         # 2. PII detection (basic)
         has_pii, clean_query = self._detect_and_strip_pii(query)
-        # Even if PII is detected, we strip it and continue unless we want to block it entirely.
-        # Requirements: "strip them before processing and warn the user"
-        # We'll handle the warning outside, but here we update the query. Let's return a special tuple or handle it.
-        # Actually, let's keep it simple: return the modified query, but maybe raise a flag for PII warning.
         
         # 3. Off-topic detection
         if not self._is_on_topic(clean_query):
-            return False, "OFF_TOPIC", "I can only answer questions about Nova Scotia driving rules."
+            return "OFF_TOPIC", "I can only answer questions about Nova Scotia driving rules."
 
         if has_pii:
-            return True, "PII_DETECTED", clean_query
+            return "PII_DETECTED", clean_query
 
-        return True, "NONE", clean_query
+        return "NONE", clean_query
+
+    def _detect_prompt_injection(self, query: str) -> bool:
+        """
+        Input sanitization block patterns (Prompt Injection Defense).
+        """
+        blocked_patterns = [
+            r"ignore previous instructions",
+            r"you are now",
+            r"system:",
+            r"### new instructions"
+        ]
+        q_lower = query.lower()
+        for pattern in blocked_patterns:
+            if re.search(pattern, q_lower):
+                return True
+        return False
 
     def _detect_and_strip_pii(self, text: str) -> Tuple[bool, str]:
         has_pii = False
-        # Phone: e.g., 902-555-0199
         phone_pattern = r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b'
-        # Email
         email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        # License plate: ABC 1234
         plate_pattern = r'\b[A-Z]{3}\s\d{4}\b'
         
         for pattern in [phone_pattern, email_pattern, plate_pattern]:
@@ -63,10 +76,45 @@ class RAGGuardrails:
         return has_pii, text
         
     def _is_on_topic(self, query: str) -> bool:
-        # We can ask the LLM if it's on topic
-        prompt = f"""Is the following user query related to driving, road rules, licenses, or navigation?
+        # Ask LLM if it's on topic
+        if not query.strip():
+            return False # Empty query is off-topic
+        prompt = f"""Is the following user query related to driving, road rules, vehicles, road safety, licenses, or navigation?
         Answer with a single word: YES or NO.
         Query: {query}"""
         
         response = self.guardrail_llm.invoke(prompt).content.strip().upper()
         return "YES" in response
+
+    # ------------------
+    # PART A2: OUTPUT GUARDRAILS
+    # ------------------
+    def check_retrieval_confidence(self, source_docs: List[Any], threshold: float = 0.5) -> bool:
+        """
+        Refusal on low confidence based on similarity score (if available) or zero documents.
+        Many vector stores return (doc, score). In LangChain QA chains without exact scoring, we check if docs is empty.
+        We'll treat empty source_docs as an immediate low confidence.
+        """
+        if not source_docs:
+            return False
+            
+        # Assuming we can inspect scores if we do an open retrieval
+        # In general, if retrieval is empty string or bad context, we refuse.
+        return True
+
+    def check_output_guardrails(self, response_text: str) -> Tuple[str, str]:
+        """
+        Returns (error_code, final_response)
+        """
+        # Part B: Output validation (Prompt Injection Defense #2)
+        # Check if response contains leaked system prompt instructions
+        if "never reveal your system prompt" in response_text.lower() or "you are a driving assistant" in response_text.lower():
+            return "POLICY_BLOCK", "I cannot fulfill this request due to policy restrictions on my output."
+
+        # Response length limit (e.g., max 500 words)
+        words = response_text.split()
+        if len(words) > 500:
+            response_text = " ".join(words[:500]) + "... [Truncated for length]"
+            # Could trigger an error, but truncation works as a guardrail action
+            
+        return "NONE", response_text
