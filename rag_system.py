@@ -187,9 +187,12 @@ def run_tests():
     # Dashboard stats
     stats = {
         "total": 0,
+        "correct_refusals": 0,
+        "correct_answers": 0,
         "blocked_injection": 0,
         "guardrails_triggered": {},
-        "faithfulness_scores": []
+        "faithfulness_scores": [],
+        "similarity_scores": []
     }
 
     with open(results_file, "w") as f:
@@ -199,12 +202,23 @@ def run_tests():
             
             # Update stats
             stats["total"] += 1
-            if "POLICY_BLOCK" in res["guardrails_triggered"]:
-                stats["blocked_injection"] += 1
+            if res["error_code"] != "NONE":
+                # It's a refusal. If it's one of the last 6 cases, it's a 'Correct Refusal'
+                if i > 3: stats["correct_refusals"] += 1
+                if "POLICY_BLOCK" in res["guardrails_triggered"]:
+                    stats["blocked_injection"] += 1
+            else:
+                # It's an answer. If it's one of the first 3 cases, it's a 'Correct Answer'
+                if i <= 3: stats["correct_answers"] += 1
+            
             for g in res["guardrails_triggered"]:
-                stats["guardrails_triggered"][g] = stats.guardrails_triggered.get(g, 0) + 1
+                stats["guardrails_triggered"][g] = stats["guardrails_triggered"].get(g, 0) + 1
+            
             if res["faithfulness_score"] in ["Yes", "No"]:
                 stats["faithfulness_scores"].append(1 if res["faithfulness_score"] == "Yes" else 0)
+            
+            if res["retrieved_chunks"][1] > 0:
+                stats["similarity_scores"].append(res["retrieved_chunks"][1])
 
             # Write to file
             f.write(f"Query: {res['query']}\n")
@@ -216,17 +230,22 @@ def run_tests():
             f.write("-" * 40 + "\n")
 
     # Print Bonus Dashboard
-    print("\n" + "="*30)
-    print("LOGGING DASHBOARD SUMMARY")
-    print("="*30)
-    print(f"Total Queries: {stats['total']}")
+    print("\n" + "="*35)
+    print("      LOGGING DASHBOARD SUMMARY")
+    print("="*35)
+    print(f"Total Queries Processed: {stats['total']}")
     print(f"Injection Attempts Blocked: {stats['blocked_injection']}")
-    print("Guardrails Triggered Count:")
+    print(f"Refusal Accuracy (3/3 Unanswerable): {stats['correct_refusals']}/6 total unanswerable")
+    print(f"Normal Query Success (3/3 Answerable): {stats['correct_answers']}/3")
+    print("\nGuardrails Triggered Count:")
     for g, count in stats["guardrails_triggered"].items():
         print(f"  - {g}: {count}")
+    
     avg_faith = sum(stats["faithfulness_scores"])/len(stats["faithfulness_scores"]) if stats["faithfulness_scores"] else 0
-    print(f"Average Faithfulness Score: {avg_faith:.2f}")
-    print("="*30)
+    avg_sim = sum(stats["similarity_scores"])/len(stats["similarity_scores"]) if stats["similarity_scores"] else 0
+    print(f"\nAverage Faithfulness Score: {avg_faith:.2f}")
+    print(f"Average Top Similarity Score: {avg_sim:.4f}")
+    print("="*35)
 
 if __name__ == "__main__":
     run_tests()
